@@ -36,7 +36,7 @@ ROOT_URLCONF = "saleor.urls"
 WSGI_APPLICATION = "saleor.wsgi.application"
 
 ADMINS = (
-    # ('Your Name', 'your_email@example.com'),
+    ('Pankaj Kumar Singh', 'pankaj.singh+saleor-prod@go4life.in'),
 )
 MANAGERS = ADMINS
 
@@ -54,7 +54,7 @@ DATABASES = {
 }
 
 
-TIME_ZONE = "America/Chicago"
+TIME_ZONE = "Asia/Kolkata"
 LANGUAGE_CODE = "en"
 LANGUAGES = [
     ("ar", "Arabic"),
