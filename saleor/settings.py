@@ -226,6 +226,7 @@ INSTALLED_APPS = [
     "saleor.warehouse",
     "saleor.webhook",
     "saleor.wishlist",
+    "saleor.wallet",
     # External apps
     "versatileimagefield",
     "django_measurement",
@@ -538,6 +539,7 @@ PLUGINS = [
     # "saleor.payment.gateways.stripe.plugin.StripeGatewayPlugin",
     # "saleor.payment.gateways.braintree.plugin.BraintreeGatewayPlugin",
     "saleor.payment.gateways.razorpay.plugin.RazorpayGatewayPlugin",
+    "saleor.payment.gateways.wallet.plugin.WalletGatewayPlugin",
 ]
 
 # Whether DraftJS should be used be used instead of HTML
