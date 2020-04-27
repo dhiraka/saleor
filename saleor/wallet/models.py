@@ -13,6 +13,10 @@ class WalletTransactionType(enum.Enum):
     Credit = 'Credit'
     Debit = 'Debit'
 
+    @classmethod
+    def choices(cls):
+        return [(key.value, key.name) for key in cls]
+
 
 class WalletQueryset(models.QuerySet):
     def delete(self):
@@ -162,8 +166,7 @@ class WalletTransaction(models.Model):
     wallet = models.ForeignKey(Wallet, related_name='wallet_transactions', null=True,
                                on_delete=models.SET_NULL)
     transaction_type = models.CharField(max_length=40,
-                                        choices=[(_type, _type.value) for _type in
-                                                 WalletTransactionType])
+                                        choices=WalletTransactionType.choices())
     amount = models.DecimalField(
         max_digits=settings.DEFAULT_MAX_DIGITS,
         decimal_places=settings.DEFAULT_DECIMAL_PLACES,
@@ -183,3 +186,6 @@ class WalletTransaction(models.Model):
         self.save()
 
     objects = WalletTransactionManager()
+
+    class Meta:
+        ordering = ['-created']

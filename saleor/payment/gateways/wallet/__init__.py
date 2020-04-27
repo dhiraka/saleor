@@ -67,7 +67,7 @@ def capture(payment_information: PaymentData, config: GatewayConfig) -> GatewayR
     if wallet and wallet.can_spend(payment_information.amount):
         wallet_transaction = wallet.withdraw(
             amount=payment_information.amount,
-            transaction_type=WalletTransactionType.Debit,
+            transaction_type=WalletTransactionType.Debit.value,
             source='Online Store',
             reason=f'Paid for online order',
             description=f'Transaction ID: {payment_information.token}')
@@ -130,7 +130,7 @@ def refund(payment_information: PaymentData, config: GatewayConfig) -> GatewayRe
                 id=payment_information.token)
             wallet_credit_transaction = wallet.deposit(
                 amount=payment_information.amount,
-                transaction_type=WalletTransactionType.Credit,
+                transaction_type=WalletTransactionType.Credit.value,
                 source='Online Store',
                 reason=f'Refund for order {payment_information.order_id}',
                 description=f'Original debit transaction ID: {payment_information.token}')
