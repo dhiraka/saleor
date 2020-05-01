@@ -6,11 +6,12 @@ from ..core.types import Money
 from ...wallet import models
 
 WalletTransactionType = graphene.Enum.from_enum(models.WalletTransactionType)
+WalletRechargeStatus = graphene.Enum.from_enum(models.WalletRechargeStatus)
 
 
 class WalletTransaction(CountableDjangoObjectType):
-    transaction_id = graphene.UUID()
     transaction_type = WalletTransactionType()
+    transaction_id = graphene.String()
 
     class Meta:
         description = "An object representing a single wallet transaction."
@@ -31,7 +32,7 @@ class WalletTransaction(CountableDjangoObjectType):
 
     @staticmethod
     def resolve_transaction_id(root: models.WalletTransaction, _info):
-        return root.id
+        return str(root.id)
 
 
 class Wallet(CountableDjangoObjectType):
@@ -69,3 +70,21 @@ class Wallet(CountableDjangoObjectType):
     @staticmethod
     def resolve_wallet_transactions(root: models.Wallet, *_args, **_kwargs):
         return root.wallet_transactions.all()
+
+
+class WalletRecharge(CountableDjangoObjectType):
+    status = WalletRechargeStatus()
+
+    class Meta:
+        description = "An object representing a single wallet recharge."
+        interfaces = [graphene.relay.Node]
+        model = models.WalletRecharge
+        filter_fields = ["id"]
+        only_fields = [
+            "id",
+            "created",
+            "wallet",
+            "payment",
+            "amount",
+            "status",
+        ]

@@ -3,10 +3,12 @@ import uuid
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.validators import MinValueValidator
 from django.db import models
 from prices import Money
 
 from .exceptions import InsufficientWalletBalance
+from ..payment.models import Payment
 
 
 class WalletTransactionType(enum.Enum):
@@ -45,6 +47,7 @@ class Wallet(models.Model):
         null=True,
         on_delete=models.SET_NULL,
         related_name="wallet",
+        db_index=True
     )
     deleted = models.NullBooleanField(editable=False)
 
@@ -93,7 +96,7 @@ class Wallet(models.Model):
         Also creates a new transaction with the deposit
         value.
         """
-        assert transaction_type == WalletTransactionType.Credit
+        assert transaction_type == WalletTransactionType.Credit.value
         ledger_amount = self.current_balance + amount
         wallet_transaction = self.wallet_transactions.create(
             transaction_type=transaction_type,
@@ -121,7 +124,7 @@ class Wallet(models.Model):
         that it automatically rolls-back during a
         transaction lifecycle.
         """
-        assert transaction_type == WalletTransactionType.Debit
+        assert transaction_type == WalletTransactionType.Debit.value
 
         if not self.can_spend(amount):
             raise InsufficientWalletBalance('This wallet has insufficient balance.')
@@ -159,18 +162,24 @@ class WalletTransactionManager(models.Manager):
         return self.with_deleted().exclude(deleted=True)
 
 
+def get_random_big_integer():
+    return int.from_bytes(uuid.uuid1().bytes, byteorder='big', signed=False) >> 64
+
+
 class WalletTransaction(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created = models.DateTimeField(auto_now_add=True)
     deleted = models.NullBooleanField(editable=False)
     wallet = models.ForeignKey(Wallet, related_name='wallet_transactions', null=True,
-                               on_delete=models.SET_NULL)
+                               on_delete=models.SET_NULL, db_index=True)
     transaction_type = models.CharField(max_length=40,
-                                        choices=WalletTransactionType.choices())
+                                        choices=WalletTransactionType.choices(),
+                                        db_index=True)
     amount = models.DecimalField(
         max_digits=settings.DEFAULT_MAX_DIGITS,
         decimal_places=settings.DEFAULT_DECIMAL_PLACES,
         editable=False,
+        validators=[MinValueValidator(Decimal('0.01'))]
     )
     ledger_amount = models.DecimalField(
         max_digits=settings.DEFAULT_MAX_DIGITS,
@@ -186,6 +195,39 @@ class WalletTransaction(models.Model):
         self.save()
 
     objects = WalletTransactionManager()
+
+    class Meta:
+        ordering = ['-created']
+
+
+class WalletRechargeStatus(enum.Enum):
+    initiated = 'initiated'
+    payment_created = 'payment_created'
+    abandoned = 'abandoned'
+    failed = 'failed'
+    successful = 'successful'
+
+    @classmethod
+    def choices(cls):
+        return [(key.value, key.name) for key in cls]
+
+
+class WalletRecharge(models.Model):
+    id = models.UUIDField(primary_key=True, editable=False, default=uuid.uuid4)
+    created = models.DateTimeField(auto_now_add=True)
+    wallet = models.ForeignKey(Wallet, on_delete=models.PROTECT, db_index=True,
+                               related_name='wallet_recharges')
+    payment = models.ForeignKey(Payment, null=True, on_delete=models.PROTECT)
+    amount = models.DecimalField(
+        max_digits=settings.DEFAULT_MAX_DIGITS,
+        decimal_places=settings.DEFAULT_DECIMAL_PLACES,
+        editable=False,
+        null=True,
+        validators=[MinValueValidator(Decimal('0.01'))]
+    )
+    status = models.CharField(max_length=40, choices=WalletRechargeStatus.choices(),
+                              db_index=True,
+                              default=WalletRechargeStatus.initiated.value)
 
     class Meta:
         ordering = ['-created']

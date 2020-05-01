@@ -64,6 +64,21 @@ def create_payment_information(
     )
 
 
+def create_razorpay_order(payment: Payment):
+    if payment.gateway == 'Razorpay' and not payment.token.startswith('order_'):
+        last_transaction: Optional[Transaction] = payment.transactions.filter(
+            kind=TransactionKind.CAPTURE).last()
+
+        if payment.can_authorize() and not last_transaction:
+            gateway = RazorpayGatewayPlugin()
+            payment_data = create_payment_information(
+                payment=payment, payment_token=payment.token, store_source=False
+            )
+            response = gateway.create_order_id(payment_data)
+            payment.token = response.transaction_id
+            payment.save()
+
+
 def create_payment(
         gateway: str,
         total: Decimal,
@@ -123,20 +138,7 @@ def create_payment(
     }
 
     payment, _ = Payment.objects.get_or_create(defaults=defaults, **data)
-
-    if payment.gateway == 'Razorpay' and not payment.token.startswith(('order_')):
-        last_transaction: Optional[Transaction] = payment.transactions.filter(
-            kind=TransactionKind.CAPTURE).last()
-
-        if payment.can_authorize() and not last_transaction:
-            gateway = RazorpayGatewayPlugin()
-            payment_data = create_payment_information(
-                payment=payment, payment_token=payment.token, store_source=False
-            )
-            response = gateway.create_order_id(payment_data)
-            payment.token = response.transaction_id
-            payment.save()
-
+    create_razorpay_order(payment)
     return payment
 
 

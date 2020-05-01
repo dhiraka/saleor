@@ -14,7 +14,7 @@ from .product.schema import ProductMutations, ProductQueries
 from .shipping.schema import ShippingMutations, ShippingQueries
 from .shop.schema import ShopMutations, ShopQueries
 from .translations.schema import TranslationQueries
-from .wallet.schema import WalletQueries
+from .wallet.schema import WalletQueries, WalletMutations
 from .warehouse.schema import (
     StockMutations,
     StockQueries,
@@ -66,6 +66,7 @@ class Mutation(
     WarehouseMutations,
     WebhookMutations,
     WishlistMutations,
+    WalletMutations,
 ):
     pass
 
