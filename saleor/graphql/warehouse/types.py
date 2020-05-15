@@ -1,8 +1,9 @@
 import graphene
+from django.db.models import Sum
+from django.db.models.functions import Coalesce
 
 from ...core.permissions import ProductPermissions
 from ...warehouse import models
-from ...warehouse.availability import get_available_quantity_for_customer
 from ..account.enums import CountryCodeEnum
 from ..core.connection import CountableDjangoObjectType
 from ..decorators import permission_required
@@ -58,21 +59,7 @@ class Warehouse(CountableDjangoObjectType):
         ]
 
 
-class StockInput(graphene.InputObjectType):
-    product_variant = graphene.ID(
-        required=True, description="Product variant associated with stock."
-    )
-    warehouse = graphene.ID(
-        required=True, description="Warehouse in which stock is located."
-    )
-    quantity = graphene.Int(description="Quantity of items available for sell.")
-
-
 class Stock(CountableDjangoObjectType):
-    stock_quantity = graphene.Int(
-        description="Quantity of a product available for sale.", required=True
-    )
-
     quantity = graphene.Int(
         required=True,
         description="Quantity of a product in the warehouse's possession, "
@@ -89,10 +76,6 @@ class Stock(CountableDjangoObjectType):
         only_fields = ["warehouse", "product_variant", "quantity", "quantity_allocated"]
 
     @staticmethod
-    def resolve_stock_quantity(root, *_args):
-        return get_available_quantity_for_customer(root)
-
-    @staticmethod
     @permission_required(ProductPermissions.MANAGE_PRODUCTS)
     def resolve_quantity(root, *_args):
         return root.quantity
@@ -100,4 +83,6 @@ class Stock(CountableDjangoObjectType):
     @staticmethod
     @permission_required(ProductPermissions.MANAGE_PRODUCTS)
     def resolve_quantity_allocated(root, *_args):
-        return root.quantity_allocated
+        return root.allocations.aggregate(
+            quantity_allocated=Coalesce(Sum("quantity_allocated"), 0)
+        )["quantity_allocated"]

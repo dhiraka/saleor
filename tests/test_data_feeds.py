@@ -1,12 +1,13 @@
 import csv
 from io import StringIO
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from django.utils.encoding import smart_text
 
 from saleor.data_feeds.google_merchant import (
     get_feed_items,
     item_attributes,
+    item_availability,
     item_google_product_category,
     write_feed,
 )
@@ -38,6 +39,11 @@ def test_saleor_feed_items(product, site_settings):
     assert attributes.get("availability") == "in stock"
 
 
+def test_saleor_get_feed_items_having_no_stock_info(variant, site_settings):
+    variant.stocks.all().delete()
+    assert item_availability(variant) == "out of stock"
+
+
 def test_category_formatter(db):
     main_category = Category(name="Main", slug="main")
     main_category.save()
@@ -64,7 +70,6 @@ def test_write_feed(product, monkeypatch):
     google_required_fields = [
         "id",
         "title",
-        "link",
         "image_link",
         "availability",
         "price",
@@ -72,11 +77,3 @@ def test_write_feed(product, monkeypatch):
     ]
     for field in google_required_fields:
         assert field in header
-
-
-@patch("saleor.data_feeds.google_merchant.item_link")
-def test_feed_contains_site_settings_domain(mocked_item_link, product, site_settings):
-    write_feed(StringIO())
-    mocked_item_link.assert_called_once_with(
-        product.variants.first(), site_settings.site
-    )

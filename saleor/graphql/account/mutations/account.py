@@ -1,5 +1,6 @@
 import graphene
 from django.conf import settings
+from django.contrib.auth import password_validation
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError
 
@@ -10,14 +11,11 @@ from ....checkout import AddressType
 from ....core.utils.url import validate_storefront_url
 from ...account.enums import AddressTypeEnum
 from ...account.types import Address, AddressInput, User
-from ...core.mutations import (
-    BaseMutation,
-    ModelDeleteMutation,
-    ModelMutation,
-    UpdateMetaBaseMutation,
-)
-from ...core.types import MetaInput
+from ...core.mutations import BaseMutation, ModelDeleteMutation, ModelMutation
 from ...core.types.common import AccountError
+from ...meta.deprecated.mutations import UpdateMetaBaseMutation
+from ...meta.deprecated.types import MetaInput
+from ..i18n import I18nMixin
 from .base import (
     INVALID_TOKEN,
     BaseAddressDelete,
@@ -57,10 +55,7 @@ class AccountRegister(ModelMutation):
     @classmethod
     def mutate(cls, root, info, **data):
         response = super().mutate(root, info, **data)
-        if not response.errors:
-            response.requires_confirmation = (
-                settings.ENABLE_ACCOUNT_CONFIRMATION_BY_EMAIL
-            )
+        response.requires_confirmation = settings.ENABLE_ACCOUNT_CONFIRMATION_BY_EMAIL
         return response
 
     @classmethod
@@ -69,16 +64,29 @@ class AccountRegister(ModelMutation):
             return super().clean_input(info, instance, data, input_cls=None)
         elif not data.get("redirect_url"):
             raise ValidationError(
-                {"redirect_url": "This field is required."},
-                code=AccountErrorCode.INVALID,
+                {
+                    "redirect_url": ValidationError(
+                        "This field is required.", code=AccountErrorCode.REQUIRED
+                    )
+                }
             )
 
         try:
             validate_storefront_url(data["redirect_url"])
         except ValidationError as error:
             raise ValidationError(
-                {"redirect_url": error}, code=AccountErrorCode.INVALID
+                {
+                    "redirect_url": ValidationError(
+                        error.message, code=AccountErrorCode.INVALID
+                    )
+                }
             )
+
+        password = data["password"]
+        try:
+            password_validation.validate_password(password, instance)
+        except ValidationError as error:
+            raise ValidationError({"password": error})
 
         return super().clean_input(info, instance, data, input_cls=None)
 
@@ -93,7 +101,7 @@ class AccountRegister(ModelMutation):
         else:
             user.save()
         account_events.customer_account_created_event(user=user)
-        info.context.extensions.customer_created(customer=user)
+        info.context.plugins.customer_created(customer=user)
 
 
 class AccountInput(graphene.InputObjectType):
@@ -216,7 +224,7 @@ class AccountDelete(ModelDeleteMutation):
         return cls.success_response(user)
 
 
-class AccountAddressCreate(ModelMutation):
+class AccountAddressCreate(ModelMutation, I18nMixin):
     user = graphene.Field(
         User, description="A user instance for which the address was created."
     )
@@ -246,14 +254,18 @@ class AccountAddressCreate(ModelMutation):
 
     @classmethod
     def perform_mutation(cls, root, info, **data):
-        success_response = super().perform_mutation(root, info, **data)
         address_type = data.get("type", None)
         user = info.context.user
-        success_response.user = user
+        cleaned_input = cls.clean_input(
+            info=info, instance=Address(), data=data.get("input")
+        )
+        address = cls.validate_address(cleaned_input)
+        cls.clean_instance(info, address)
+        cls.save(info, address, cleaned_input)
+        cls._save_m2m(info, address, cleaned_input)
         if address_type:
-            instance = success_response.address
-            utils.change_user_default_address(user, instance, address_type)
-        return success_response
+            utils.change_user_default_address(user, address, address_type)
+        return AccountAddressCreate(user=user, address=address)
 
     @classmethod
     def save(cls, info, instance, cleaned_input):
@@ -376,8 +388,9 @@ class RequestEmailChange(BaseMutation):
         if not user.check_password(password):
             raise ValidationError(
                 {
-                    "user_password": ValidationError(
-                        "Password isn't valid.", code=AccountErrorCode.INVALID_PASSWORD
+                    "password": ValidationError(
+                        "Password isn't valid.",
+                        code=AccountErrorCode.INVALID_CREDENTIALS,
                     )
                 }
             )

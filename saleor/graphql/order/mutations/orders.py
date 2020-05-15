@@ -18,17 +18,15 @@ from ....order.error_codes import OrderErrorCode
 from ....order.utils import get_valid_shipping_methods_for_order
 from ....payment import CustomPaymentChoices, PaymentError, gateway
 from ...account.types import AddressInput
-from ...core.mutations import (
-    BaseMutation,
-    ClearMetaBaseMutation,
-    UpdateMetaBaseMutation,
-)
+from ...core.mutations import BaseMutation
 from ...core.scalars import Decimal
-from ...core.types import MetaInput, MetaPath
 from ...core.types.common import OrderError
+from ...meta.deprecated.mutations import ClearMetaBaseMutation, UpdateMetaBaseMutation
+from ...meta.deprecated.types import MetaInput, MetaPath
 from ...order.mutations.draft_orders import DraftOrderUpdate
 from ...order.types import Order, OrderEvent
 from ...shipping.types import ShippingMethod
+from ...utils import get_user_or_app_from_context
 
 
 def clean_order_update_shipping(order, method):
@@ -241,7 +239,7 @@ class OrderUpdateShipping(BaseMutation):
         clean_order_update_shipping(order, method)
 
         order.shipping_method = method
-        order.shipping_price = info.context.extensions.calculate_order_shipping(order)
+        order.shipping_price = info.context.plugins.calculate_order_shipping(order)
         order.shipping_method_name = method.name
         order.save(
             update_fields=[
@@ -258,7 +256,9 @@ class OrderUpdateShipping(BaseMutation):
 
 
 class OrderAddNoteInput(graphene.InputObjectType):
-    message = graphene.String(description="Note message.", name="message")
+    message = graphene.String(
+        description="Note message.", name="message", required=True
+    )
 
 
 class OrderAddNote(BaseMutation):
@@ -282,10 +282,27 @@ class OrderAddNote(BaseMutation):
         error_type_field = "order_errors"
 
     @classmethod
+    def clean_input(cls, _info, _instance, data):
+        message = data["input"]["message"].strip()
+        if not message:
+            raise ValidationError(
+                {
+                    "message": ValidationError(
+                        "Message can't be empty.", code=OrderErrorCode.REQUIRED,
+                    )
+                }
+            )
+        data["input"]["message"] = message
+        return data
+
+    @classmethod
     def perform_mutation(cls, _root, info, **data):
         order = cls.get_node_or_error(info, data.get("id"), only_type=Order)
+        cleaned_input = cls.clean_input(info, order, data)
         event = events.order_note_added_event(
-            order=order, user=info.context.user, message=data.get("input")["message"]
+            order=order,
+            user=info.context.user,
+            message=cleaned_input["input"]["message"],
         )
         return OrderAddNote(order=order, event=event)
 
@@ -295,9 +312,6 @@ class OrderCancel(BaseMutation):
 
     class Arguments:
         id = graphene.ID(required=True, description="ID of the order to cancel.")
-        restock = graphene.Boolean(
-            required=True, description="Determine if lines will be restocked or not."
-        )
 
     class Meta:
         description = "Cancel an order."
@@ -306,10 +320,11 @@ class OrderCancel(BaseMutation):
         error_type_field = "order_errors"
 
     @classmethod
-    def perform_mutation(cls, _root, info, restock, **data):
+    def perform_mutation(cls, _root, info, **data):
         order = cls.get_node_or_error(info, data.get("id"), only_type=Order)
         clean_order_cancel(order)
-        cancel_order(order=order, user=info.context.user, restock=restock)
+        requester = get_user_or_app_from_context(info.context)
+        cancel_order(order=order, user=requester)
         return OrderCancel(order=order)
 
 

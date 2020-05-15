@@ -1,4 +1,3 @@
-from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -6,7 +5,6 @@ from measurement.measures import Weight
 from prices import Money, TaxedMoney
 
 from saleor.checkout import calculations, utils
-from saleor.checkout.context_processors import checkout_counter
 from saleor.checkout.models import Checkout
 from saleor.checkout.utils import add_variant_to_checkout
 from saleor.product.models import Category
@@ -62,24 +60,27 @@ def test_get_user_checkout(
 def test_adding_zero_quantity(checkout, product):
     variant = product.variants.get()
     add_variant_to_checkout(checkout, variant, 0)
-    assert len(checkout) == 0
+    assert checkout.lines.count() == 0
 
 
 def test_adding_same_variant(checkout, product):
     variant = product.variants.get()
     add_variant_to_checkout(checkout, variant, 1)
     add_variant_to_checkout(checkout, variant, 2)
-    assert len(checkout) == 1
+    assert checkout.lines.count() == 1
     assert checkout.quantity == 3
     subtotal = TaxedMoney(Money("30.00", "USD"), Money("30.00", "USD"))
-    assert calculations.checkout_subtotal(checkout) == subtotal
+    assert (
+        calculations.checkout_subtotal(checkout=checkout, lines=list(checkout))
+        == subtotal
+    )
 
 
 def test_replacing_same_variant(checkout, product):
     variant = product.variants.get()
     add_variant_to_checkout(checkout, variant, 1, replace=True)
     add_variant_to_checkout(checkout, variant, 2, replace=True)
-    assert len(checkout) == 1
+    assert checkout.lines.count() == 1
     assert checkout.quantity == 2
 
 
@@ -101,15 +102,6 @@ def test_shipping_detection(checkout, product):
     variant = product.variants.get()
     add_variant_to_checkout(checkout, variant, replace=True)
     assert checkout.is_shipping_required()
-
-
-def test_checkout_counter(monkeypatch):
-    monkeypatch.setattr(
-        "saleor.checkout.context_processors.get_checkout_from_request",
-        Mock(return_value=Mock(quantity=4)),
-    )
-    ret = checkout_counter(Mock())
-    assert ret == {"checkout_counter": 4}
 
 
 def test_get_prices_of_discounted_specific_product(

@@ -161,8 +161,8 @@ class Order(ModelWithMetadata):
         default=0,
     )
     discount = MoneyField(amount_field="discount_amount", currency_field="currency")
-    discount_name = models.CharField(max_length=255, default="", blank=True)
-    translated_discount_name = models.CharField(max_length=255, default="", blank=True)
+    discount_name = models.CharField(max_length=255, blank=True, null=True)
+    translated_discount_name = models.CharField(max_length=255, blank=True, null=True)
     display_gross_prices = models.BooleanField(default=True)
     customer_note = models.TextField(blank=True, default="")
     weight = MeasurementField(
@@ -219,11 +219,6 @@ class Order(ModelWithMetadata):
     def __str__(self):
         return "#%d" % (self.id,)
 
-    # Deprecated. To remove in #5022
-    @staticmethod
-    def get_absolute_url():
-        return ""
-
     def get_last_payment(self):
         return max(self.payments.all(), default=None, key=attrgetter("pk"))
 
@@ -270,7 +265,9 @@ class Order(ModelWithMetadata):
         return self.status in statuses
 
     def can_cancel(self):
-        return self.status not in {OrderStatus.CANCELED, OrderStatus.DRAFT}
+        return (
+            not self.fulfillments.exclude(status=FulfillmentStatus.CANCELED).exists()
+        ) and self.status not in {OrderStatus.CANCELED, OrderStatus.DRAFT}
 
     def can_capture(self, payment=None):
         if not payment:
@@ -433,6 +430,9 @@ class Fulfillment(ModelWithMetadata):
     tracking_number = models.CharField(max_length=255, default="", blank=True)
     created = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        ordering = ("pk",)
+
     def __str__(self):
         return f"Fulfillment #{self.composed_id}"
 
@@ -467,6 +467,13 @@ class FulfillmentLine(models.Model):
         Fulfillment, related_name="lines", on_delete=models.CASCADE
     )
     quantity = models.PositiveIntegerField()
+    stock = models.ForeignKey(
+        "warehouse.Stock",
+        related_name="fulfillment_lines",
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+    )
 
 
 class OrderEvent(models.Model):
@@ -500,3 +507,10 @@ class OrderEvent(models.Model):
 
     def __repr__(self):
         return f"{self.__class__.__name__}(type={self.type!r}, user={self.user!r})"
+
+
+class Invoice(models.Model):
+    order = models.ForeignKey(Order, null=True, on_delete=models.SET_NULL)
+    number = models.CharField(max_length=255)
+    created = models.DateTimeField(auto_now_add=True)
+    url = models.URLField(max_length=2048)

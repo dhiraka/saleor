@@ -28,34 +28,24 @@ from ....product.utils.attributes import (
     associate_attribute_values_to_instance,
     generate_name_for_variant,
 )
-from ....warehouse.management import set_stock_quantity
-from ...core.mutations import (
-    BaseMutation,
-    ClearMetaBaseMutation,
-    ModelDeleteMutation,
-    ModelMutation,
-    UpdateMetaBaseMutation,
-)
+from ...core.mutations import BaseMutation, ModelDeleteMutation, ModelMutation
 from ...core.scalars import Decimal, WeightScalar
 from ...core.types import SeoInput, Upload
 from ...core.types.common import ProductError
 from ...core.utils import (
     clean_seo_fields,
     from_global_id_strict_type,
+    get_duplicated_values,
     validate_image_file,
     validate_slug_and_generate_if_needed,
 )
 from ...core.utils.reordering import perform_reordering
-from ..types import (
-    Category,
-    Collection,
-    MoveProductInput,
-    Product,
-    ProductImage,
-    ProductVariant,
-)
+from ...meta.deprecated.mutations import ClearMetaBaseMutation, UpdateMetaBaseMutation
+from ...warehouse.types import Warehouse
+from ..types import Category, Collection, Product, ProductImage, ProductVariant
 from ..utils import (
-    get_used_attibute_values_for_variant,
+    create_stocks,
+    get_used_attribute_values_for_variant,
     get_used_variants_attribute_values,
     validate_attribute_input_for_product,
     validate_attribute_input_for_variant,
@@ -261,6 +251,18 @@ class CollectionDelete(ModelDeleteMutation):
         permissions = (ProductPermissions.MANAGE_PRODUCTS,)
         error_type_class = ProductError
         error_type_field = "product_errors"
+
+
+class MoveProductInput(graphene.InputObjectType):
+    product_id = graphene.ID(
+        description="The ID of the product to move.", required=True
+    )
+    sort_order = graphene.Int(
+        description=(
+            "The relative sorting position of the product (from -inf to +inf) "
+            "starting from the first given product's actual position."
+        )
+    )
 
 
 class CollectionReorderProducts(BaseMutation):
@@ -524,12 +526,6 @@ class ProductInput(graphene.InputObjectType):
             "a product doesn't use variants."
         )
     )
-    quantity = graphene.Int(
-        description=(
-            "The total quantity of a product available for sale. Note: this field is "
-            "only used if a product doesn't use variants."
-        )
-    )
     track_inventory = graphene.Boolean(
         description=(
             "Determines if the inventory of this product should be tracked. If false, "
@@ -539,11 +535,26 @@ class ProductInput(graphene.InputObjectType):
     )
 
 
+class StockInput(graphene.InputObjectType):
+    warehouse = graphene.ID(
+        required=True, description="Warehouse in which stock is located."
+    )
+    quantity = graphene.Int(description="Quantity of items available for sell.")
+
+
 class ProductCreateInput(ProductInput):
     product_type = graphene.ID(
         description="ID of the type that product belongs to.",
         name="productType",
         required=True,
+    )
+    stocks = graphene.List(
+        graphene.NonNull(StockInput),
+        description=(
+            "Stocks of a product available for sale. Note: this field is "
+            "only used if a product doesn't use variants."
+        ),
+        required=False,
     )
 
 
@@ -791,6 +802,18 @@ class ProductCreate(ModelMutation):
     @classmethod
     def clean_input(cls, info, instance, data):
         cleaned_input = super().clean_input(info, instance, data)
+
+        weight = cleaned_input.get("weight")
+        if weight and weight.value < 0:
+            raise ValidationError(
+                {
+                    "weight": ValidationError(
+                        "Product can't have negative weight.",
+                        code=ProductErrorCode.INVALID,
+                    )
+                }
+            )
+
         # Attributes are provided as list of `AttributeValueInput` objects.
         # We need to transform them into the format they're stored in the
         # `Product` model, which is HStore field that maps attribute's PK to
@@ -812,6 +835,15 @@ class ProductCreate(ModelMutation):
         # from the schema, only "basePrice" should be used here.
         price = data.get("base_price", data.get("price"))
         if price is not None:
+            if price < 0:
+                raise ValidationError(
+                    {
+                        "basePrice": ValidationError(
+                            "Product base price cannot be lower than 0.",
+                            code=ProductErrorCode.INVALID,
+                        )
+                    }
+                )
             cleaned_input["price_amount"] = price
             if instance.minimal_variant_price_amount is None:
                 # Set the default "minimal_variant_price" to the "price"
@@ -820,11 +852,11 @@ class ProductCreate(ModelMutation):
         # FIXME  tax_rate logic should be dropped after we remove tax_rate from input
         tax_rate = cleaned_input.pop("tax_rate", "")
         if tax_rate:
-            info.context.extensions.assign_tax_code_to_object_meta(instance, tax_rate)
+            info.context.plugins.assign_tax_code_to_object_meta(instance, tax_rate)
 
         tax_code = cleaned_input.pop("tax_code", "")
         if tax_code:
-            info.context.extensions.assign_tax_code_to_object_meta(instance, tax_code)
+            info.context.plugins.assign_tax_code_to_object_meta(instance, tax_code)
 
         if attributes and product_type:
             try:
@@ -847,6 +879,9 @@ class ProductCreate(ModelMutation):
 
         clean_seo_fields(cleaned_input)
         cls.clean_sku(product_type, cleaned_input)
+        stocks = cleaned_input.get("stocks")
+        if stocks:
+            cls.check_for_duplicates_in_stocks(stocks)
         return cleaned_input
 
     @classmethod
@@ -880,6 +915,16 @@ class ProductCreate(ModelMutation):
                 )
 
     @classmethod
+    def check_for_duplicates_in_stocks(cls, stocks_data):
+        warehouse_ids = [stock["warehouse"] for stock in stocks_data]
+        duplicates = get_duplicated_values(warehouse_ids)
+        if duplicates:
+            error_msg = "Duplicated warehouse ID: {}".format(duplicates.join(", "))
+            raise ValidationError(
+                {"stocks": ValidationError(error_msg, code=ProductErrorCode.UNIQUE)}
+            )
+
+    @classmethod
     def get_instance(cls, info, **data):
         """Prefetch related fields that are needed to process the mutation."""
         # If we are updating an instance and want to update its attributes,
@@ -910,13 +955,21 @@ class ProductCreate(ModelMutation):
             variant = models.ProductVariant.objects.create(
                 product=instance, track_inventory=track_inventory, sku=sku
             )
-            quantity = cleaned_input.get("quantity")
-            if quantity is not None:
-                set_stock_quantity(variant, info.context.country, quantity)
+            stocks = cleaned_input.get("stocks")
+            if stocks:
+                cls.create_variant_stocks(variant, stocks)
 
         attributes = cleaned_input.get("attributes")
         if attributes:
             AttributeAssignmentMixin.save(instance, attributes)
+
+    @classmethod
+    def create_variant_stocks(cls, variant, stocks):
+        warehouse_ids = [stock["warehouse"] for stock in stocks]
+        warehouses = cls.get_nodes_or_error(
+            warehouse_ids, "warehouse", only_type=Warehouse
+        )
+        create_stocks(variant, stocks, warehouses)
 
     @classmethod
     def _save_m2m(cls, info, instance, cleaned_data):
@@ -927,7 +980,7 @@ class ProductCreate(ModelMutation):
     @classmethod
     def perform_mutation(cls, _root, info, **data):
         response = super().perform_mutation(_root, info, **data)
-        info.context.extensions.product_created(response.product)
+        info.context.plugins.product_created(response.product)
         return response
 
 
@@ -972,9 +1025,6 @@ class ProductUpdate(ProductCreate):
             if "track_inventory" in cleaned_input:
                 variant.track_inventory = cleaned_input["track_inventory"]
                 update_fields.append("track_inventory")
-            if "quantity" in cleaned_input:
-                quantity = cleaned_input.get("quantity")
-                set_stock_quantity(variant, info.context.country, quantity)
             if "sku" in cleaned_input:
                 variant.sku = cleaned_input["sku"]
                 update_fields.append("sku")
@@ -1049,9 +1099,6 @@ class ProductVariantInput(graphene.InputObjectType):
     cost_price = Decimal(description="Cost price of the variant.")
     price_override = Decimal(description="Special price of the particular variant.")
     sku = graphene.String(description="Stock keeping unit.")
-    quantity = graphene.Int(
-        description="The total quantity of this variant available for sale."
-    )
     track_inventory = graphene.Boolean(
         description=(
             "Determines if the inventory of this variant should be tracked. If false, "
@@ -1071,6 +1118,11 @@ class ProductVariantCreateInput(ProductVariantInput):
         description="Product ID of which type is the variant.",
         name="product",
         required=True,
+    )
+    stocks = graphene.List(
+        graphene.NonNull(StockInput),
+        description=("Stocks of a product available for sale."),
+        required=False,
     )
 
 
@@ -1107,7 +1159,7 @@ class ProductVariantCreate(ModelMutation):
         if attribute_values in used_attribute_values:
             raise ValidationError(
                 "Duplicated attribute values for product variant.",
-                ProductErrorCode.UNIQUE,
+                ProductErrorCode.DUPLICATED_INPUT_ITEM,
             )
         else:
             used_attribute_values.append(attribute_values)
@@ -1118,11 +1170,46 @@ class ProductVariantCreate(ModelMutation):
     ):
         cleaned_input = super().clean_input(info, instance, data)
 
+        weight = cleaned_input.get("weight")
+        if weight and weight.value < 0:
+            raise ValidationError(
+                {
+                    "weight": ValidationError(
+                        "Product variant can't have negative weight.",
+                        code=ProductErrorCode.INVALID.value,
+                    )
+                }
+            )
+
         if "cost_price" in cleaned_input:
-            cleaned_input["cost_price_amount"] = cleaned_input.pop("cost_price")
+            cost_price = cleaned_input.pop("cost_price")
+            if cost_price and cost_price < 0:
+                raise ValidationError(
+                    {
+                        "costPrice": ValidationError(
+                            "Product price cannot be lower than 0.",
+                            code=ProductErrorCode.INVALID.value,
+                        )
+                    }
+                )
+            cleaned_input["cost_price_amount"] = cost_price
 
         if "price_override" in cleaned_input:
-            cleaned_input["price_override_amount"] = cleaned_input.pop("price_override")
+            price_override = cleaned_input.pop("price_override")
+            if price_override and price_override < 0:
+                raise ValidationError(
+                    {
+                        "priceOverride": ValidationError(
+                            "Product price cannot be lower than 0.",
+                            code=ProductErrorCode.INVALID.value,
+                        )
+                    }
+                )
+            cleaned_input["price_override_amount"] = price_override
+
+        stocks = cleaned_input.get("stocks")
+        if stocks:
+            cls.check_for_duplicates_in_stocks(stocks)
 
         # Attributes are provided as list of `AttributeValueInput` objects.
         # We need to transform them into the format they're stored in the
@@ -1157,6 +1244,16 @@ class ProductVariantCreate(ModelMutation):
         return cleaned_input
 
     @classmethod
+    def check_for_duplicates_in_stocks(cls, stocks_data):
+        warehouse_ids = [stock["warehouse"] for stock in stocks_data]
+        duplicates = get_duplicated_values(warehouse_ids)
+        if duplicates:
+            error_msg = "Duplicated warehouse ID: {}".format(", ".join(duplicates))
+            raise ValidationError(
+                {"stocks": ValidationError(error_msg, code=ProductErrorCode.UNIQUE)}
+            )
+
+    @classmethod
     def get_instance(cls, info, **data):
         """Prefetch related fields that are needed to process the mutation.
 
@@ -1184,15 +1281,23 @@ class ProductVariantCreate(ModelMutation):
         instance.save()
         # Recalculate the "minimal variant price" for the parent product
         update_product_minimal_variant_price_task.delay(instance.product_id)
-        quantity = cleaned_input.get("quantity")
-        if quantity is not None:
-            set_stock_quantity(instance, info.context.country, quantity)
+        stocks = cleaned_input.get("stocks")
+        if stocks:
+            cls.create_variant_stocks(instance, stocks)
 
         attributes = cleaned_input.get("attributes")
         if attributes:
             AttributeAssignmentMixin.save(instance, attributes)
             instance.name = generate_name_for_variant(instance)
             instance.save(update_fields=["name"])
+
+    @classmethod
+    def create_variant_stocks(cls, variant, stocks):
+        warehouse_ids = [stock["warehouse"] for stock in stocks]
+        warehouses = cls.get_nodes_or_error(
+            warehouse_ids, "warehouse", only_type=Warehouse
+        )
+        create_stocks(variant, stocks, warehouses)
 
 
 class ProductVariantUpdate(ProductVariantCreate):
@@ -1218,7 +1323,7 @@ class ProductVariantUpdate(ProductVariantCreate):
         # Check if the variant is getting updated,
         # and the assigned attributes do not change
         if instance.product_id is not None:
-            assigned_attributes = get_used_attibute_values_for_variant(instance)
+            assigned_attributes = get_used_attribute_values_for_variant(instance)
             input_attribute_values = defaultdict(list)
             for attribute in attributes:
                 input_attribute_values[attribute.id].extend(attribute.values)
@@ -1337,6 +1442,18 @@ class ProductTypeCreate(ModelMutation):
     @classmethod
     def clean_input(cls, info, instance, data):
         cleaned_input = super().clean_input(info, instance, data)
+
+        weight = cleaned_input.get("weight")
+        if weight and weight.value < 0:
+            raise ValidationError(
+                {
+                    "weight": ValidationError(
+                        "Product type can't have negative weight.",
+                        code=ProductErrorCode.INVALID,
+                    )
+                }
+            )
+
         try:
             cleaned_input = validate_slug_and_generate_if_needed(
                 instance, "name", cleaned_input
@@ -1348,17 +1465,14 @@ class ProductTypeCreate(ModelMutation):
         # FIXME  tax_rate logic should be dropped after we remove tax_rate from input
         tax_rate = cleaned_input.pop("tax_rate", "")
         if tax_rate:
-            if "taxes" not in instance.meta:
-                instance.meta["taxes"] = {}
-            instance.meta["taxes"]["vatlayer"] = {
-                "code": tax_rate,
-                "description": tax_rate,
-            }
-            info.context.extensions.assign_tax_code_to_object_meta(instance, tax_rate)
+            instance.store_value_in_metadata(
+                {"vatlayer.code": tax_rate, "description": tax_rate}
+            )
+            info.context.plugins.assign_tax_code_to_object_meta(instance, tax_rate)
 
         tax_code = cleaned_input.pop("tax_code", "")
         if tax_code:
-            info.context.extensions.assign_tax_code_to_object_meta(instance, tax_code)
+            info.context.plugins.assign_tax_code_to_object_meta(instance, tax_code)
 
         return cleaned_input
 

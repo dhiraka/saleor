@@ -1,12 +1,11 @@
-import logging
 from unittest import mock
 
 import graphene
 import pytest
 from django.test import override_settings
 
+from saleor.demo.views import EXAMPLE_QUERY
 from saleor.graphql.product.types import Product
-from saleor.graphql.views import handled_errors_logger, unhandled_errors_logger
 
 from .conftest import API_PATH
 from .utils import _get_graphql_content_from_response, get_graphql_content
@@ -128,28 +127,6 @@ def test_graphql_execution_exception(monkeypatch, api_client):
     assert content["errors"][0]["message"] == "Spanish inquisition"
 
 
-class LoggingHandler(logging.Handler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.messages = []
-
-    def emit(self, record: logging.LogRecord):
-        exc_type, exc_value, _tb = record.exc_info
-        self.messages.append(
-            f"{record.name}[{record.levelname.upper()}].{exc_type.__name__}"
-        )
-
-
-@pytest.fixture
-def graphql_log_handler():
-    log_handler = LoggingHandler()
-
-    unhandled_errors_logger.addHandler(log_handler)
-    handled_errors_logger.addHandler(log_handler)
-
-    return log_handler
-
-
 def test_invalid_query_graphql_errors_are_logged_in_another_logger(
     api_client, graphql_log_handler
 ):
@@ -227,3 +204,9 @@ def test_unexpected_exceptions_are_logged_in_their_own_logger(
     assert graphql_log_handler.messages == [
         "saleor.graphql.errors.unhandled[ERROR].NotImplementedError"
     ]
+
+
+def test_example_query(api_client, product):
+    response = api_client.post_graphql(EXAMPLE_QUERY)
+    content = get_graphql_content(response)
+    assert content["data"]["products"]["edges"][0]["node"]["name"] == product.name
